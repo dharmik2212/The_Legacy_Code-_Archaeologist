@@ -1,11 +1,16 @@
 # from langchain_community
 from langchain_huggingface import HuggingFaceEndpoint,ChatHuggingFace,HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
+from langchain_text_splitters import RecursiveCharacterTextSplitter,Language
+from langchain_core.runnables import RunnablePassthrough
+from langchain_community.vectorstores import FAISS
+# from langchain_community.vectorstores import SKLearnVectorStore
 from langchain_community.document_loaders import GithubFileLoader
 from langchain_core.output_parsers import StrOutputParser
 import os
 import requests
 from dotenv import load_dotenv
+from torch import embedding
 load_dotenv()
 
 class GithubLoaderWithHistory(GithubFileLoader):
@@ -20,7 +25,7 @@ class GithubLoaderWithHistory(GithubFileLoader):
             
             # Call GitHub API for history
             url = f"https://api.github.com/repos/{self.repo}/commits"
-            params = {"path": filename, "per_page": 5} # Get last 3 commits
+            params = {"path": filename, "per_page": 5} # Get last  5 commits
             headers = {"Authorization": f"Bearer {self.access_token}"}
             
             response = requests.get(url, headers=headers, params=params)
@@ -37,7 +42,8 @@ class GithubLoaderWithHistory(GithubFileLoader):
             doc.metadata['history'] = history_str
             
         return docs
-
+    
+embeddings= HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
 llm=HuggingFaceEndpoint(
     repo_id='meta-llama/Meta-Llama-3-8B-Instruct',
     huggingfacehub_api_token=os.getenv('HUGGINGFACEHUB_ACCESS_TOKEN'),
@@ -59,35 +65,58 @@ loader = GithubLoaderWithHistory(
     file_filter=lambda file_path: file_path.endswith(target_filename)
 )
 
-docs = loader.load()
+raw_docs = loader.load()
 
-if not docs:
+if not raw_docs:
     print(f"❌ Error: Could not find '{target_filename}' in the repo.")
     exit()
 
-# 3. PREPARE CONTEXT (Now it's small and fits easily!)
-code_context = docs[0].page_content
+splitter = RecursiveCharacterTextSplitter.from_language(
+    language=Language.PYTHON,
+    chunk_size=1000,
+    chunk_overlap=200
+)
 
+print("✂️ Splitting code...")
+splited_text = splitter.split_documents(raw_docs)
 
+vectorstore = FAISS.from_documents(splited_text, embeddings)
+
+retriever = vectorstore.as_retriever(
+    search_type="mmr", 
+    search_kwargs={"k": 4, "fetch_k": 20}
+)
+
+def format_docs(docs):
+    formatted_output = ""
+    for doc in docs:
+        formatted_output += f"\n--- RELEVANT CODE SNIPPET ---\n"
+        formatted_output += doc.page_content
+        formatted_output += f"\n\n--- HISTORY FOR THIS FILE ---\n"
+        formatted_output += doc.metadata.get('history', 'No history found.')
+        formatted_output += "\n" + "="*20
+    return formatted_output
 
 prompt= PromptTemplate(
-    template="""CODEBASE:
-    {codebase}
+    template="""
+    You are a senior developer analyzing code.
+    Use the following retrieved context (Code Snippets + Git History) to answer the question.
     
-    -----------------
-    GIT COMMIT HISTORY (Who changed this and when):
-    {history}
+    CONTEXT:
+    {context}
     
-    -----------------
     QUESTION: {topic}
+    
+    ANSWER:
     """,
-    input_variables=['topic', 'codebase', 'history']
+    input_variables=['topic', 'context']
 )
 parser= StrOutputParser()
-chain=prompt|model|parser
-res=chain.invoke({
-    'topic': 'Who worked on this file last and what will break if I change pyshorteners?',
-    'codebase': docs[0].page_content,
-    'history': docs[0].metadata['history']
-    })
+chain=chain = (
+    {"context": retriever | format_docs, "topic": RunnablePassthrough()}
+    | prompt
+    | model
+    | StrOutputParser()
+)
+res=chain.invoke('Who modified the Shortener class and what happens if I remove it?')
 print(res)
