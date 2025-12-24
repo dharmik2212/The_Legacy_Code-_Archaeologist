@@ -1,5 +1,8 @@
 # from langchain_community
-from langchain_huggingface import HuggingFaceEndpoint,ChatHuggingFace,HuggingFaceEmbeddings
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+from langchain_huggingface import HuggingFaceEndpoint,ChatHuggingFace,HuggingFaceEndpointEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter,Language
 from langchain_core.runnables import RunnablePassthrough
@@ -7,10 +10,9 @@ from langchain_community.vectorstores import FAISS
 # from langchain_community.vectorstores import SKLearnVectorStore
 from langchain_community.document_loaders import GithubFileLoader
 from langchain_core.output_parsers import StrOutputParser
-import os
 import requests
 from dotenv import load_dotenv
-from torch import embedding
+
 load_dotenv()
 
 class GithubLoaderWithHistory(GithubFileLoader):
@@ -21,8 +23,6 @@ class GithubLoaderWithHistory(GithubFileLoader):
         # 2. Automatically fetch history for each file found
         for doc in docs:
             filename = doc.metadata['source']
-            print(f"🤖 Automatically fetching history for: {filename}...")
-            
             # Call GitHub API for history
             url = f"https://api.github.com/repos/{self.repo}/commits"
             params = {"path": filename, "per_page": 5} # Get last  5 commits
@@ -43,7 +43,10 @@ class GithubLoaderWithHistory(GithubFileLoader):
             
         return docs
     
-embeddings= HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+embeddings= HuggingFaceEndpointEmbeddings(
+    model='sentence-transformers/all-MiniLM-L6-v2',
+    huggingfacehub_api_token=os.getenv("HUGGINGFACEHUB_ACCESS_TOKEN")
+)                                              
 llm=HuggingFaceEndpoint(
     repo_id='meta-llama/Meta-Llama-3-8B-Instruct',
     huggingfacehub_api_token=os.getenv('HUGGINGFACEHUB_ACCESS_TOKEN'),
@@ -77,7 +80,7 @@ splitter = RecursiveCharacterTextSplitter.from_language(
     chunk_overlap=200
 )
 
-print("✂️ Splitting code...")
+
 splited_text = splitter.split_documents(raw_docs)
 
 vectorstore = FAISS.from_documents(splited_text, embeddings)
@@ -100,7 +103,7 @@ def format_docs(docs):
 prompt= PromptTemplate(
     template="""
     You are a senior developer analyzing code.
-    Use the following retrieved context (Code Snippets + Git History) to answer the question.
+    Use the following retrieved context (Code Snippets + Git History) to answer the question but first of all tell the user first who commited that code or modified it recently.
     
     CONTEXT:
     {context}
@@ -120,3 +123,5 @@ chain=chain = (
 )
 res=chain.invoke('Who modified the Shortener class and what happens if I remove it?')
 print(res)
+
+
