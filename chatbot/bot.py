@@ -3,7 +3,7 @@
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 from langchain_huggingface import HuggingFaceEndpoint,ChatHuggingFace,HuggingFaceEndpointEmbeddings
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter,Language
 from langchain_core.runnables import RunnablePassthrough
 from langchain_community.vectorstores import FAISS
@@ -15,32 +15,64 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class GithubLoaderWithHistory(GithubFileLoader):
+class GithubLoaderWithBlame(GithubFileLoader):
     def load(self):
-        # 1. Let the original loader get the file content
         docs = super().load()
-        
-        # 2. Automatically fetch history for each file found
         for doc in docs:
-            filename = doc.metadata['source']
-            # Call GitHub API for history
-            url = f"https://api.github.com/repos/{self.repo}/commits"
-            params = {"path": filename, "per_page": 5} # Get last  5 commits
+            filename = doc.metadata.get('source', '')
+            print(f"🔦 Digging into Git Blame for: {filename}...")
+            
+            # GraphQL Query for precise line-by-line ownership
+            query = """
+            query($owner: String!, $repo: String!, $path: String!) {
+              repository(owner: $owner, name: $repo) {
+                object(expression: "main") {
+                  ... on Commit {
+                    blame(path: $path) {
+                      ranges {
+                        startingLine
+                        endingLine
+                        commit {
+                          oid
+                          message
+                          author { name date }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            variables = {
+                "owner": self.repo.split('/')[0],
+                "repo": self.repo.split('/')[1],
+                "path": filename
+            }
             headers = {"Authorization": f"Bearer {self.access_token}"}
             
-            response = requests.get(url, headers=headers, params=params)
-            
-            history_str = ""
-            if response.status_code == 200:
-                for commit in response.json():
-                    author = commit['commit']['author']['name']
-                    date = commit['commit']['author']['date'].split("T")[0]
-                    msg = commit['commit']['message']
-                    history_str += f"- [{date}] {author}: {msg}\n"
-            
-            # 3. Inject history directly into the Document
-            doc.metadata['history'] = history_str
-            
+            try:
+                response = requests.post(
+                    "https://api.github.com/graphql",
+                    json={"query": query, "variables": variables},
+                    headers=headers
+                )
+                
+                blame_info = ""
+                if response.status_code == 200:
+                    data = response.json().get('data', {})
+                    ranges = data['repository']['object']['blame']['ranges']
+                    for r in ranges:
+                        author = r['commit']['author']['name']
+                        date = r['commit']['author']['date'][:10]
+                        msg = r['commit']['message'].split('\n')[0]
+                        lines = f"Lines {r['startingLine']}-{r['endingLine']}"
+                        blame_info += f"[{lines}] {author} on {date}: \"{msg}\"\n"
+                
+                doc.metadata['blame'] = blame_info
+            except Exception as e:
+                doc.metadata['blame'] = f"Blame data unavailable: {e}"
+        
         return docs
     
 embeddings= HuggingFaceEndpointEmbeddings(
@@ -59,13 +91,11 @@ REPO_NAME = "ToDo"
 target_filename = "index.html"  # <--- CHANGE THIS to the exact file you want
 
 # print(f"dt Fetching ONLY {target_filename}...")
-
-loader = GithubLoaderWithHistory(
+loader = GithubLoaderWithBlame(
     repo=f"{REPO_OWNER}/{REPO_NAME}",
     access_token=os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN'),
     branch="main",
-    # 2. FILTER: This lambda function returns True ONLY if the filename matches
-    file_filter=lambda file_path: file_path.endswith(target_filename)
+    file_filter=lambda f: f.endswith(f"{target_filename}")
 )
 
 raw_docs = loader.load()
@@ -74,57 +104,47 @@ if not raw_docs:
     print(f"❌ Error: Could not find '{target_filename}' in the repo.")
     exit()
 
-splitter = RecursiveCharacterTextSplitter.from_language(
-    language=Language.HTML,
-    chunk_size=500,
-    chunk_overlap=50
-)
 
 
-splited_text = splitter.split_documents(raw_docs)
 
-vectorstore = FAISS.from_documents(splited_text, embeddings)
-
-retriever = vectorstore.as_retriever(
-    search_type="mmr", 
-    search_kwargs={"k": 4, "fetch_k": 20}
-)
-
-def format_docs(docs):
-    formatted_output = ""
+def format_docs_with_blame(docs):
+    formatted = ""
     for doc in docs:
-        source_file = doc.metadata.get('source', 'Unknown File')
-        git_history = doc.metadata.get('history', 'No history found.')
-        formatted_output += f"\nFILE: {source_file}\n"
-        formatted_output += f"--- GIT COMMIT HISTORY (Latest first) ---\n"
-        formatted_output += git_history
-        formatted_output += f"\n--- CODE CONTENT ---\n"
-        formatted_output += doc.page_content
-        formatted_output += "\n" + "="*40
-    return formatted_output
+        formatted += f"\n--- FILE: {doc.metadata.get('source')} ---\n"
+        formatted += f"OWNERSHIP & BLAME (Who touched which lines):\n"
+        formatted += doc.metadata.get('blame', 'No blame data.')
+        formatted += f"\n--- CODE SNIPPET ---\n"
+        formatted += doc.page_content
+        formatted += "\n" + "="*30
+    return formatted
 
-prompt= PromptTemplate(
-    template="""
-    You are a senior developer analyzing code.
-    You have been given code snippets and their corresponding Git commit history.
+prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a Senior Architect & Code Archaeologist. 
+    You are provided with Code Snippets and Git Blame data (which shows line-by-line ownership).
     
-    INSTRUCTIONS:
-    1. Look at the 'GIT COMMIT HISTORY' section to see WHO made changes and WHEN.
-    2. The first entry in the history is the LATEST modification.
-    3. If asked about a specific class or line, match it to the history provided.
-    
-    CONTEXT:
+    When answering:
+    1. Identify 'WHO': Use the [Lines X-Y] notation in the Blame data to name the developer.
+    2. Analyze 'IMPACT': Look at the code logic. If a line is changed, what functions or variables depend on it?
+    3. Be Specific: Mention exact line numbers and commit messages from the history.
+    """),
+    ("human", """
+    CONTEXT (Blame + Code):
     {context}
     
-    QUESTION: {topic}
+    USER QUESTION: {topic}
     
-    ANSWER:
-    """,
-    input_variables=['topic', 'context']
-)
+    DETAILED ANALYSIS:""")
+])
+
+splitter = RecursiveCharacterTextSplitter.from_language(language=Language.PYTHON, chunk_size=800, chunk_overlap=100)
+chunks = splitter.split_documents(raw_docs)
+
+vectorstore = FAISS.from_documents(chunks, embeddings)
+retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
+
 parser= StrOutputParser()
-chain=chain = (
-    {"context": retriever | format_docs, "topic": RunnablePassthrough()}
+chain = (
+    {"context": retriever | format_docs_with_blame, "topic": RunnablePassthrough()}
     | prompt
     | model
     | StrOutputParser()
