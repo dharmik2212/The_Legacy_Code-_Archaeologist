@@ -54,9 +54,9 @@ llm=HuggingFaceEndpoint(
 )
 
 model=ChatHuggingFace(llm=llm)
-REPO_OWNER = "sanket-sakariya"
-REPO_NAME = "URL-SHORTENER"
-target_filename = "app.py"  # <--- CHANGE THIS to the exact file you want
+REPO_OWNER = "renish-1111"
+REPO_NAME = "ToDo"
+target_filename = "index.html"  # <--- CHANGE THIS to the exact file you want
 
 # print(f"dt Fetching ONLY {target_filename}...")
 
@@ -75,9 +75,9 @@ if not raw_docs:
     exit()
 
 splitter = RecursiveCharacterTextSplitter.from_language(
-    language=Language.PYTHON,
-    chunk_size=1000,
-    chunk_overlap=200
+    language=Language.HTML,
+    chunk_size=500,
+    chunk_overlap=50
 )
 
 
@@ -93,17 +93,25 @@ retriever = vectorstore.as_retriever(
 def format_docs(docs):
     formatted_output = ""
     for doc in docs:
-        formatted_output += f"\n--- RELEVANT CODE SNIPPET ---\n"
+        source_file = doc.metadata.get('source', 'Unknown File')
+        git_history = doc.metadata.get('history', 'No history found.')
+        formatted_output += f"\nFILE: {source_file}\n"
+        formatted_output += f"--- GIT COMMIT HISTORY (Latest first) ---\n"
+        formatted_output += git_history
+        formatted_output += f"\n--- CODE CONTENT ---\n"
         formatted_output += doc.page_content
-        formatted_output += f"\n\n--- HISTORY FOR THIS FILE ---\n"
-        formatted_output += doc.metadata.get('history', 'No history found.')
-        formatted_output += "\n" + "="*20
+        formatted_output += "\n" + "="*40
     return formatted_output
 
 prompt= PromptTemplate(
     template="""
     You are a senior developer analyzing code.
-    Use the following retrieved context (Code Snippets + Git History) to answer the question but first of all tell the user first who commited that code or modified it recently.
+    You have been given code snippets and their corresponding Git commit history.
+    
+    INSTRUCTIONS:
+    1. Look at the 'GIT COMMIT HISTORY' section to see WHO made changes and WHEN.
+    2. The first entry in the history is the LATEST modification.
+    3. If asked about a specific class or line, match it to the history provided.
     
     CONTEXT:
     {context}
@@ -121,7 +129,7 @@ chain=chain = (
     | model
     | StrOutputParser()
 )
-res=chain.invoke('Who modified the Shortener class and what happens if I remove it?')
+res=chain.invoke('what happens if I remove   <button onClick={(e)=>handleEdit> i sure this line or code commited so give answer based on it')
 print(res)
 
 
