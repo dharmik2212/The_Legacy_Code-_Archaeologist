@@ -86,9 +86,9 @@ llm=HuggingFaceEndpoint(
 )
 
 model=ChatHuggingFace(llm=llm)
-REPO_OWNER = "renish-1111"
-REPO_NAME = "ToDo"
-target_filename = "index.html"  # <--- CHANGE THIS to the exact file you want
+REPO_OWNER = input("Enter the GitHub repository owner: ")
+REPO_NAME = input("Enter the GitHub repository name: ")
+target_filename = input("Enter the target filename: ")
 
 # print(f"dt Fetching ONLY {target_filename}...")
 loader = GithubLoaderWithBlame(
@@ -149,7 +149,6 @@ chain = (
     | model
     | StrOutputParser()
 )
-res=chain.invoke('what happens if I remove   <button onClick={(e)=>handleEdit> i sure this line or code commited so give answer based on it')
+query=input("Enter your question about the codebase: ")
+res=chain.invoke(query)
 print(res)
-
-
